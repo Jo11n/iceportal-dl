@@ -1,0 +1,7 @@
+# Environment
+.*/
+
+
+# Generated data captures
+*.json
+fixtures/
