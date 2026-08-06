@@ -2,7 +2,7 @@
 // @name         ICEportal-dl Media Downloader
 // @namespace    https://github.com/Jo11n/iceportal-dl
 // @version      0.1.0
-// @description  Download-Helfer für das ICEportal der DB (Audiobücher und Zeitschriften)
+// @description  Download-Helfer für das ICEportal der DB (Audiobücher, Podcasts und Zeitschriften)
 // @author       Jo11n
 // @match        https://iceportal.de/*
 // @grant        GM_download
