@@ -801,6 +801,7 @@
       letterSpacing: '0.04em',
       color: COLORS.textLight,
       background: COLORS.btnBg,
+      textShadow: textGlow(COLORS.accent),
       width: 'auto',
       ...styles,
     });
@@ -896,7 +897,7 @@
       const isActive = btn.dataset.tab === activeTab;
       btn.style.background = isActive ? COLORS.btnActiveBg : COLORS.btnBg;
       btn.style.color = isActive ? COLORS.accentText : COLORS.textLight;
-      btn.style.textShadow = isActive ? 'none' : '';
+      btn.style.textShadow = isActive ? 'none' : textGlow(COLORS.accent);
     });
   }
 

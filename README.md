@@ -8,6 +8,10 @@ Ein Userscript, das beim Download von Medien (Hörbücher, Podcasts, Magazine) a
 - Fügt Meta-Daten hinzu (Hörbücher)
 - Baut optional aus vielen kleinen Audiodateien eine große (Hörbücher)
 
+
+![Screenshot](screenshot.png)
+
+
 ## Installation
 
 1. Einen Userscript-Manager installieren, z. B. [Tampermonkey](https://www.tampermonkey.net/).
@@ -16,10 +20,14 @@ Ein Userscript, das beim Download von Medien (Hörbücher, Podcasts, Magazine) a
 
 ## Scope
 
-Videos (DRM) sind momentan out of scope.
+Videos (DRM) sind out of scope.
 
 ## Inspirationsquellen / Alternativen
 
 - [https://github.com/julijane/iceportal-leecher](https://github.com/julijane/iceportal-leecher) (Go)
 - [https://github.com/ddrews-de/iceportal-downloader](https://github.com/ddrews-de/iceportal-downloader (Python)
 - [https://github.com/alexanderadam/train_portal_downloader](https://github.com/alexanderadam/train_portal_downloader) (Ruby)
+
+## Änderungen
+
+[changelog](CHANGELOG.md)
