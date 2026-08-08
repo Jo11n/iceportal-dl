@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ICEportal-dl Media Downloader
 // @namespace    https://github.com/Jo11n/iceportal-dl
-// @version      0.2.0
+// @version      0.3.0
 // @description  Download-Helfer für das ICEportal der DB (Audiobücher, Podcasts und Zeitschriften)
 // @author       Jo11n
 // @match        https://iceportal.de/*
@@ -708,6 +708,12 @@
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 176, 0];
   }
 
+  // Tight bright core + wider soft halo, mirroring the boxShadow "LED glow" used elsewhere.
+  function textGlow(hex) {
+    const [r, g, b] = hexRgb(hex);
+    return `0 0 2px rgba(${r},${g},${b},0.9), 0 0 6px rgba(${r},${g},${b},0.6), 0 0 14px rgba(${r},${g},${b},0.35)`;
+  }
+
   // Doto (SIL OFL 1.1, https://fonts.google.com/specimen/Doto), wght=900/ROND=100,
   // full basic-Latin + Latin-Extended charsets (covers German umlauts/ß in author
   // and title text). Self-hosted so the LED-style UI renders without a network
@@ -830,6 +836,7 @@
       textTransform: 'uppercase',
       letterSpacing: '0.04em',
       boxShadow:   `0 0 14px rgba(${hexRgb(COLORS.accent).join(',')},0.18)`,  // faint LED glow
+      textShadow:  textGlow(COLORS.accent),
       zIndex:      '2147483647',
       boxSizing:   'border-box',
       lineHeight:  '1.5',
@@ -889,6 +896,7 @@
       const isActive = btn.dataset.tab === activeTab;
       btn.style.background = isActive ? COLORS.btnActiveBg : COLORS.btnBg;
       btn.style.color = isActive ? COLORS.accentText : COLORS.textLight;
+      btn.style.textShadow = isActive ? 'none' : '';
     });
   }
 
@@ -990,6 +998,7 @@
       padding:      '4px 22px 4px 6px',   // room for our custom arrow on the right
       border:       `1px solid ${COLORS.accent}`,
       color:        COLORS.accentText,
+      textShadow:   'none',
       fontFamily:   DISPLAY_FONT,
       fontSize:     '12px',
       textTransform: 'uppercase',
@@ -1135,6 +1144,7 @@
     const dlAllBtn = makeButton(`Alle ${total} Kapitel herunterladen`, {
       background:   COLORS.accent,
       color:        COLORS.accentText,
+      textShadow:   'none',
       marginBottom: '10px',
       padding:      '5px 10px',
       fontSize:     '12px',
@@ -1387,6 +1397,7 @@
     const dlAllBtn = makeButton(`Alle ${total} Folgen herunterladen`, {
       background:   COLORS.accent,
       color:        COLORS.accentText,
+      textShadow:   'none',
       marginBottom: '10px',
       padding:      '5px 10px',
       fontSize:     '12px',
@@ -1462,6 +1473,7 @@
       right:     '24px',
       padding:   '10px 14px',
       boxShadow: `0 0 14px rgba(${hexRgb(COLORS.accent).join(',')},0.35)`,
+      textShadow: textGlow(COLORS.accent),
       zIndex:    '2147483647',
     });
     btn.title = 'ICEportal-dl MediaDownloader';

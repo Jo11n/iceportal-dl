@@ -1,5 +1,12 @@
 # Changelog
 
+
+## 0.3.0
+
+### Changed
+
+- **now with more glow!**
+
 ## 0.2.0
 
 ### Changed

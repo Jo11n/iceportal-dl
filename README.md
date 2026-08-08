@@ -20,6 +20,6 @@ Videos (DRM) sind momentan out of scope.
 
 ## Inspirationsquellen / Alternativen
 
-[https://github.com/julijane/iceportal-leecher](https://github.com/julijane/iceportal-leecher) (Go)
-[https://github.com/ddrews-de/iceportal-downloader](https://github.com/ddrews-de/iceportal-downloader) (Python)
-[https://github.com/alexanderadam/train_portal_downloader](https://github.com/alexanderadam/train_portal_downloader) (Ruby)
+- [https://github.com/julijane/iceportal-leecher](https://github.com/julijane/iceportal-leecher) (Go)
+- [https://github.com/ddrews-de/iceportal-downloader](https://github.com/ddrews-de/iceportal-downloader (Python)
+- [https://github.com/alexanderadam/train_portal_downloader](https://github.com/alexanderadam/train_portal_downloader) (Ruby)
