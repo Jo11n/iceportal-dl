@@ -660,7 +660,7 @@
   // UI helpers
   // ---------------------------------------------------------------------------
 
-  const COLORS = {
+  const COLORS_YELLOW = {
     panelBg:      '#000000',
     headerBg:     '#000000',
     detailBg:     '#000000',
@@ -672,6 +672,41 @@
     muted:        '#8a6200',   // dim amber — secondary text / separators
     textLight:    '#ffb000',   // amber — primary text
   };
+
+  const COLORS_TURQUOISE = {
+    panelBg:      '#000000',
+    headerBg:     '#000000',
+    detailBg:     '#000000',
+    accent:       '#43B0B6',  // primary turquoise (balanced, readable)
+    accentHover:  '#6FE3DA',  // brighter cyan glow (manually corrected toward green)
+    accentText:   '#000000',
+    btnBg:        '#000000',
+    btnActiveBg:  '#43B0B6',
+    muted:        '#186A70',  // dim teal (from dark cluster)
+    textLight:    '#43B0B6',
+  };
+
+  const COLORS_RED = {
+    panelBg:      '#000000',
+    headerBg:     '#000000',
+    detailBg:     '#000000',
+    accent:       '#D01E3A',
+    accentHover:  '#FF4A6A',
+    accentText:   '#000000',
+    btnBg:        '#000000',
+    btnActiveBg:  '#D01E3A',
+    muted:        '#7A1A2A',
+    textLight:    '#D01E3A',
+  };
+
+  const PALETTES = [COLORS_YELLOW, COLORS_TURQUOISE, COLORS_RED];
+  const COLORS = PALETTES[Math.floor(Math.random() * PALETTES.length)];
+
+  // Convert a hex color to [r, g, b] for use in rgba() strings.
+  function hexRgb(hex) {
+    const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 176, 0];
+  }
 
   // Doto (SIL OFL 1.1, https://fonts.google.com/specimen/Doto), wght=900/ROND=100,
   // full basic-Latin + Latin-Extended charsets (covers German umlauts/ß in author
@@ -794,7 +829,7 @@
       fontSize:    '13px',
       textTransform: 'uppercase',
       letterSpacing: '0.04em',
-      boxShadow:   '0 0 14px rgba(255,176,0,0.18)',  // faint LED glow
+      boxShadow:   `0 0 14px rgba(${hexRgb(COLORS.accent).join(',')},0.18)`,  // faint LED glow
       zIndex:      '2147483647',
       boxSizing:   'border-box',
       lineHeight:  '1.5',
@@ -1426,7 +1461,7 @@
       bottom:    '24px',
       right:     '24px',
       padding:   '10px 14px',
-      boxShadow: '0 0 14px rgba(255,176,0,0.35)',
+      boxShadow: `0 0 14px rgba(${hexRgb(COLORS.accent).join(',')},0.35)`,
       zIndex:    '2147483647',
     });
     btn.title = 'ICEportal-dl MediaDownloader';
