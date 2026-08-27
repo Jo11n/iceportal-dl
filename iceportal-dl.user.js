@@ -2,7 +2,7 @@
 // @name         ICEportal-dl Media Downloader
 // @name:de      ICEportal-dl Media Downloader
 // @namespace    https://github.com/Jo11n/iceportal-dl
-// @version      0.3.0
+// @version      0.4.0
 // @description  Download helper for the ICEportal of DB (audiobooks, podcasts, and magazines)
 // @description:de  Download-Helfer für das ICEportal der DB (Audiobücher, Podcasts und Zeitschriften)
 // @author       Jo11n
@@ -460,6 +460,33 @@
   const _hdlr = (type, name) => _fullbox('hdlr', 0, 0, _u32(0), _str4(type), _u32(0), _u32(0), _u32(0), concatBytes([TE.encode(name), new Uint8Array([0])]));
   const _tkhd = (trackId, flags, volume, ticks) => _fullbox('tkhd', 0, flags, _u32(0), _u32(0), _u32(trackId), _u32(0), _u32(ticks), _u32(0), _u32(0), _u16(0), _u16(0), _u16(volume), _u16(0), _MATRIX, _u32(0), _u32(0));
 
+  // Identifies whether two chapters' AAC streams are actually compatible for
+  // raw concatenation: same channel layout/sample size/rate (fixed mp4a
+  // header) and same DecoderSpecificInfo (AudioSpecificConfig). Deliberately
+  // excludes bufferSizeDB/maxBitrate/avgBitrate — those are per-encode VBR
+  // statistics that legitimately differ between chapters of the same book.
+  function mp4aCodecFingerprint(mp4aBox) {
+    const dv = new DataView(mp4aBox.buffer, mp4aBox.byteOffset, mp4aBox.byteLength);
+    const channelCount = dv.getUint16(24);
+    const sampleSize = dv.getUint16(26);
+    const sampleRate = dv.getUint32(32);
+    const esds = _find(_boxList(dv, 36, mp4aBox.byteLength), 'esds');
+    if (!esds) return null;
+    let p = esds.dataStart + 4; // skip esds FullBox version/flags
+    const readByte = () => mp4aBox[p++];
+    const readDescriptorLen = () => { let len = 0, byte; do { byte = readByte(); len = (len << 7) | (byte & 0x7f); } while (byte & 0x80); return len; };
+    readByte(); readDescriptorLen();        // ES_Descriptor tag(03) + length
+    p += 3;                                 // ES_ID(2) + flags(1)
+    readByte(); readDescriptorLen();        // DecoderConfigDescriptor tag(04) + length
+    const objectType = readByte();
+    const streamType = readByte();
+    p += 3 + 4 + 4;                         // bufferSizeDB + maxBitrate + avgBitrate — skipped on purpose
+    readByte();                             // DecoderSpecificInfo tag(05)
+    const ascLen = readDescriptorLen();
+    const asc = mp4aBox.slice(p, p + ascLen);
+    return [channelCount, sampleSize, sampleRate, objectType, streamType, Array.from(asc).join(',')].join('|');
+  }
+
   function _boxList(dv, start, end) {
     const list = [];
     let o = start;
@@ -492,6 +519,7 @@
     const stsd = _find(sk, 'stsd');
     const mp4a = _boxList(dv, stsd.dataStart + 8, stsd.end)[0];
     const mp4aBytes = b.slice(mp4a.start, mp4a.end);
+    const codecFingerprint = mp4aCodecFingerprint(mp4aBytes);
 
     let p = _find(sk, 'stsz').dataStart + 4;
     const uniform = dv.getUint32(p); p += 4;
@@ -526,7 +554,7 @@
     let d = 0;
     for (let i = 0; i < count; i++) { data.set(b.subarray(offsets[i], offsets[i] + sizes[i]), d); d += sizes[i]; }
 
-    return { timescale, mp4aBytes, sizes, deltas, data, count, ftypBytes: b.slice(ftyp.start, ftyp.end) };
+    return { timescale, mp4aBytes, codecFingerprint, sizes, deltas, data, count, ftypBytes: b.slice(ftyp.start, ftyp.end) };
   }
 
   function _rleStts(deltas) {
@@ -605,12 +633,6 @@
     return concatBytes([ftyp, mdat, moov]);
   }
 
-  function _bytesEqual(a, b) {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-    return true;
-  }
-
   // Resolve every chapter's media URL (capped concurrency); null url = failed.
   async function resolveAll(sorted) {
     return mapWithConcurrency(sorted, RESOLVE_CONCURRENCY, async chapter => {
@@ -637,9 +659,10 @@
       }
 
       // Concatenating without re-encoding is only valid if every chapter shares
-      // the exact AAC config; bail if they diverge.
+      // the exact AAC config; bail if they diverge. Per-chapter VBR bitrate
+      // stats are excluded from the fingerprint since they always differ.
       const ref = chapters[0];
-      if (!chapters.every(c => c.timescale === ref.timescale && _bytesEqual(c.mp4aBytes, ref.mp4aBytes))) {
+      if (!chapters.every(c => c.timescale === ref.timescale && c.codecFingerprint === ref.codecFingerprint)) {
         btn.textContent = '[FEHLER] Kapitel haben unterschiedliche Audioformate'; return;
       }
 
@@ -758,6 +781,33 @@
       #ice-dl-panel option:hover {
         background: ${COLORS.accent} !important;
         color: ${COLORS.accentText} !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // Inline styles (via css()) win over plain CSS, so overriding them for the
+  // mobile breakpoint requires !important here rather than another inline pass.
+  function injectResponsiveStyle() {
+    if (document.getElementById('ice-dl-responsive')) return;
+    const style = document.createElement('style');
+    style.id = 'ice-dl-responsive';
+    style.textContent = `
+      @media (max-width: 640px) {
+        #ice-dl-panel {
+          top: 0 !important;
+          right: 0 !important;
+          left: 0 !important;
+          bottom: 0 !important;
+          width: 100% !important;
+          max-height: 100% !important;
+          font-size: 16px !important;
+        }
+        #ice-dl-panel strong { font-size: 18px !important; }
+        #ice-dl-panel button,
+        #ice-dl-panel select,
+        #ice-dl-panel option,
+        #ice-dl-status { font-size: 15px !important; }
       }
     `;
     document.head.appendChild(style);
@@ -1470,6 +1520,7 @@
   function buildToggle() {
     injectDotMatrixFont();
     injectSelectTheme();
+    injectResponsiveStyle();
     const btn = makeButton('iceportal-dl', {
       position:  'fixed',
       bottom:    '24px',

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+### Changed
+- **mobile: larger font and panel fills screen**
+
+### Fixed
+- **merge safety check now ignores VBR bitrate differences**
 
 ## 0.3.0
 
