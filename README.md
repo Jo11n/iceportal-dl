@@ -4,11 +4,13 @@
 
 A userscript that helps when downloading media (audiobooks, podcasts, magazines) from the ICEportal of Deutsche Bahn. To make the wait time for connecting trains pass more quickly.
 
-- Lists audiobooks, podcasts, and magazines
-- Filter options (category, genre, time)
+- Lists audiobooks, podcasts, and magazines (with issue date)
+- Filter options (category, genre, time; for magazines also newspaper/magazine/English)
 - Sets useful filenames
 - Adds metadata (audiobooks)
 - Optionally combines many small audio files into one large file (audiobooks)
+- Remembers download progress with checkmarks and partial-track counts (magazines per issue)
+- Marks titles that are new since the last visit with [NEU]
 
 
 ![Screenshot](screenshot.png)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+- **Persistent download indicators** for audiobooks, podcasts, and magazines
+- **Partial-track counts** for multitrack downloads
+- **Filters for magazines**
+- **Indicators for new/updated titles**
+
 ## 0.4.0
 
 ### Changed

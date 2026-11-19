@@ -2,12 +2,14 @@
 // @name         ICEportal-dl Media Downloader
 // @name:de      ICEportal-dl Media Downloader
 // @namespace    https://github.com/Jo11n/iceportal-dl
-// @version      0.4.0
+// @version      0.5.0
 // @description  Download helper for the ICEportal of DB (audiobooks, podcasts, and magazines)
 // @description:de  Download-Helfer für das ICEportal der DB (Audiobücher, Podcasts und Zeitschriften)
 // @author       Jo11n
 // @match        https://iceportal.de/*
 // @grant        GM_download
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      iceportal.de
 // @license      MIT
 // @homepageURL  https://github.com/Jo11n/iceportal-dl
@@ -107,6 +109,15 @@
   // definition; collected so the genre dropdown offers only values in use.
   let audiobookGenres = [];
   let podcastFilterDefs = [];
+  let magazineFilterDefs = [];
+
+  // The kiosk filter mixes topics with these format/language flags; they get
+  // their own dropdown, with labels replacing the portal's all-caps texts.
+  const MAGAZINE_FORMAT_LABELS = {
+    zeitung:  'Zeitungen',
+    magazin:  'Magazine',
+    englisch: 'Englischsprachig',
+  };
 
   // Display labels for duration buckets — shared by both audiobook and podcast
   // filter bars so all four buckets format consistently.
@@ -182,14 +193,28 @@
   // "marker" lives on the item itself (not nested under "picture").
   async function listMagazines() {
     const data = await fetchJSON('/api1/rs/page/zeitungskiosk');
-    return data.teaserGroups[0].items
+    const group = data.teaserGroups[0];
+    magazineFilterDefs = (group.filter && group.filter.items || []).filter(f => f.id !== 'alle');
+    return group.items
       .filter(item => item.marker && item.marker.text === 'Freies Exemplar')
       .sort((a, b) => a.title.localeCompare(b.title))
-      .map(item => ({ title: item.title, href: item.navigation.href }));
+      .map(item => ({ title: item.title, href: item.navigation.href, filterIds: item.filterIds || [] }));
   }
 
-  async function getMagazineDetails(href) {
-    return fetchJSON(`/api1/rs/page${href}`);
+  // Current issue's publication date per href. The list endpoint lacks it, and
+  // the cover path's timestamp is the upload date, not the publication date.
+  const magazineIssueDates = new Map();
+  // Shared so a re-render during background loading doesn't request twice.
+  const magazineDetailRequests = new Map();
+
+  function getMagazineDetails(href) {
+    if (!magazineDetailRequests.has(href)) {
+      const request = fetchJSON(`/api1/rs/page${href}`)
+        .then(details => { magazineIssueDates.set(href, details.date); return details; })
+        .finally(() => magazineDetailRequests.delete(href));
+      magazineDetailRequests.set(href, request);
+    }
+    return magazineDetailRequests.get(href);
   }
 
   // details.navigation.href is the direct PDF download path, e.g.
@@ -203,6 +228,63 @@
   // Download
   // ---------------------------------------------------------------------------
 
+  const DOWNLOAD_STORE_KEY = 'iceportal-dl.download-state.v1';
+  const DOWNLOAD_STATE_EVENT = 'iceportal-dl-download-state-change';
+  // GM_download callbacks die with the page, so a 'gm' entry from an earlier
+  // script run can never resolve; it then counts as started but unconfirmed.
+  const SCRIPT_START = Date.now();
+
+  function readDownloadStore() {
+    try {
+      return JSON.parse(GM_getValue(DOWNLOAD_STORE_KEY, '{}'));
+    } catch (e) {
+      console.error('[ICE DL] download state read failed', e);
+      return {};
+    }
+  }
+
+  function writeDownloadStore(store) {
+    GM_setValue(DOWNLOAD_STORE_KEY, JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent(DOWNLOAD_STATE_EVENT));
+  }
+
+  function isPending(entry) {
+    return !!entry && entry.state === 'initiated' && entry.source === 'gm' && entry.updatedAt >= SCRIPT_START;
+  }
+
+  function isSucceeded(entry) {
+    return !!entry && (entry.state === 'completed' || (entry.state === 'initiated' && !isPending(entry)));
+  }
+
+  function markDownloadState(key, state, source = 'userscript') {
+    const store = readDownloadStore();
+    // A failed or still-running re-download leaves the earlier file in place.
+    if (state !== 'completed' && isSucceeded(store[key])) return;
+    store[key] = { state, source, updatedAt: Date.now() };
+    writeDownloadStore(store);
+  }
+
+  function clearDownloadStatePrefix(prefix) {
+    const store = readDownloadStore();
+    Object.keys(store).forEach(key => { if (key.startsWith(prefix)) delete store[key]; });
+    writeDownloadStore(store);
+  }
+
+  const audiobookPrefix = slug => `audiobook:${encodeURIComponent(slug)}:`;
+  const audiobookChapterPrefix = slug => `${audiobookPrefix(slug)}chapter:`;
+  const audiobookChapterKey = (slug, serialNumber) => audiobookChapterPrefix(slug) + serialNumber;
+  const audiobookChapterKeys = (slug, files) => files.map(f => audiobookChapterKey(slug, f.serialNumber));
+  const audiobookMergedKey = slug => `${audiobookPrefix(slug)}merged:m4b`;
+
+  const podcastPrefix = slug => `podcast:${encodeURIComponent(slug)}:`;
+  const podcastEpisodePrefix = slug => `${podcastPrefix(slug)}episode:`;
+  const podcastEpisodeKey = (slug, serialNumber) => podcastEpisodePrefix(slug) + serialNumber;
+  const podcastEpisodeKeys = (slug, files) => files.map(f => podcastEpisodeKey(slug, f.serialNumber));
+
+  // Keyed per issue (publication date) so a new issue starts unmarked.
+  const magazinePrefix = href => `magazine:${encodeURIComponent(href)}:`;
+  const magazineKey = (href, date) => `${magazinePrefix(href)}issue:${date}`;
+
   function clickDownloadLink(href, filename) {
     const a = document.createElement('a');
     a.href = href;
@@ -212,9 +294,22 @@
     a.remove();
   }
 
-  function triggerDownload(url, filename) {
-    if (typeof GM_download !== 'undefined') GM_download({ url, name: filename });
-    else clickDownloadLink(url, filename);
+  function triggerDownload(url, filename, stateKey) {
+    if (typeof GM_download !== 'undefined') {
+      markDownloadState(stateKey, 'initiated', 'gm');
+      const fail = () => markDownloadState(stateKey, 'failed');
+      GM_download({
+        url,
+        name: filename,
+        onload: () => markDownloadState(stateKey, 'completed'),
+        onerror: fail,
+        ontimeout: fail,
+        onabort: fail,
+      });
+    } else {
+      clickDownloadLink(url, filename);
+      markDownloadState(stateKey, 'initiated', 'fallback');
+    }
   }
 
   function buildFilename(author, bookTitle, serialNumber, chapterTitle, totalChapters, ext = 'mp3') {
@@ -397,16 +492,17 @@
 
   const fetchAudioBuffer = async url => (await fetchWithRetry(url)).arrayBuffer();
 
-  function triggerBlobDownload(blob, filename) {
+  function triggerBlobDownload(blob, filename, stateKey) {
     const url = URL.createObjectURL(blob);
     clickDownloadLink(url, filename);
+    markDownloadState(stateKey, 'initiated', 'fallback');
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   // Buffer, tag, and download. Any failure degrades to a plain streamed download.
-  async function downloadTaggedChapter(url, filename, tags) {
+  async function downloadTaggedChapter(url, filename, tags, stateKey) {
     if (!/\.(m4a|m4b|mp4)(\?|$)/i.test(url)) {
-      triggerDownload(url, filename); // not an MP4 container — nothing to tag
+      triggerDownload(url, filename, stateKey); // not an MP4 container — nothing to tag
       return;
     }
     let buffer;
@@ -414,7 +510,7 @@
       buffer = await fetchAudioBuffer(url);
     } catch (e) {
       console.error('[ICE DL] buffering failed, streaming untagged', e);
-      triggerDownload(url, filename);
+      triggerDownload(url, filename, stateKey);
       return;
     }
     let tagged;
@@ -424,7 +520,7 @@
       console.error('[ICE DL] tagging failed, downloading untagged', e);
       tagged = buffer;
     }
-    triggerBlobDownload(new Blob([tagged], { type: 'audio/mp4' }), filename);
+    triggerBlobDownload(new Blob([tagged], { type: 'audio/mp4' }), filename, stateKey);
   }
 
   // ---------------------------------------------------------------------------
@@ -644,11 +740,17 @@
   // Buffers the whole book in memory before muxing.
   async function mergeBookDownload(sorted, tagCtx, btn) {
     const { rawAuthor, rawBookTitle, total, coverPromise } = tagCtx;
+    const mergedKey = audiobookMergedKey(tagCtx.slug);
     btn.disabled = true;
+    btn.dataset.downloadInProgress = '1';
     try {
       btn.textContent = `[...] Löse ${total} Kapitel auf…`;
       const resolved = await resolveAll(sorted);
-      if (resolved.some(r => !r.url)) { btn.textContent = '[FEHLER] Konnte nicht alle Kapitel auflösen'; return; }
+      if (resolved.some(r => !r.url)) {
+        markDownloadState(mergedKey, 'failed');
+        btn.textContent = '[FEHLER] Konnte nicht alle Kapitel auflösen';
+        return;
+      }
 
       const chapters = [], titles = [];
       for (let i = 0; i < resolved.length; i++) {
@@ -663,6 +765,7 @@
       // stats are excluded from the fingerprint since they always differ.
       const ref = chapters[0];
       if (!chapters.every(c => c.timescale === ref.timescale && c.codecFingerprint === ref.codecFingerprint)) {
+        markDownloadState(mergedKey, 'failed');
         btn.textContent = '[FEHLER] Kapitel haben unterschiedliche Audioformate'; return;
       }
 
@@ -671,12 +774,15 @@
       const tags = { title: cleanText(rawBookTitle), artist: cleanText(rawAuthor), album: cleanText(rawBookTitle), cover: cover && cover.bytes ? cover : null };
       const file = buildMergedM4b(chapters, titles, tags);
       const filename = `${sanitize(rawAuthor)} - ${sanitize(rawBookTitle)}.m4b`;
-      triggerBlobDownload(new Blob([file], { type: 'audio/mp4' }), filename);
-      btn.textContent = `[OK] ${total} Kapitel zusammengeführt`;
+      triggerBlobDownload(new Blob([file], { type: 'audio/mp4' }), filename, mergedKey);
+      delete btn.dataset.downloadInProgress;
+      setExactDownloadLabel(btn, readDownloadStore());
     } catch (e) {
+      markDownloadState(mergedKey, 'failed');
       console.error('[ICE DL] merge failed', e);
       btn.textContent = `[FEHLER] ${e.message}`;
     } finally {
+      delete btn.dataset.downloadInProgress;
       btn.disabled = false;
     }
   }
@@ -860,15 +966,199 @@
     return btn;
   }
 
+  function createPixelCheckmark(confirmed, description = 'Heruntergeladen', color = COLORS.accent) {
+    const badge = document.createElement('span');
+    badge.setAttribute('role', 'img');
+    badge.setAttribute('aria-label', confirmed ? description : 'Herunterladen gestartet');
+    badge.title = confirmed
+      ? `${description} – vom Browser bestätigt`
+      : 'Herunterladen gestartet; Speicherort wurde nicht geprüft';
+    css(badge, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      height: '14px',
+      lineHeight: '14px',
+      marginLeft: '6px',
+      verticalAlign: 'middle',
+      flexShrink: '0',
+    });
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 7 7');
+    svg.setAttribute('width', '14');
+    svg.setAttribute('height', '14');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.style.shapeRendering = 'crispEdges';
+    svg.style.display = 'block';
+
+    const pixels = [
+      [1, 4], [2, 5], [3, 5], [4, 4], [5, 3], [6, 2],
+    ];
+    pixels.forEach(([x, y]) => {
+      const pixel = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      pixel.setAttribute('x', x);
+      pixel.setAttribute('y', y);
+      pixel.setAttribute('width', '1');
+      pixel.setAttribute('height', '1');
+      pixel.setAttribute('fill', color);
+      svg.appendChild(pixel);
+    });
+    badge.appendChild(svg);
+    return badge;
+  }
+
+  function createTextBadge(text, title) {
+    const badge = document.createElement('span');
+    badge.textContent = text;
+    badge.title = title;
+    css(badge, { color: COLORS.accent, whiteSpace: 'nowrap', marginLeft: '6px', flexShrink: '0' });
+    return badge;
+  }
+
+  function countStates(store, keys) {
+    const counts = { succeeded: 0, confirmed: 0, pending: 0, failed: 0 };
+    keys.forEach(key => {
+      const entry = store[key];
+      if (isSucceeded(entry)) {
+        counts.succeeded++;
+        if (entry.state === 'completed') counts.confirmed++;
+      } else if (isPending(entry)) counts.pending++;
+      else if (entry && entry.state === 'failed') counts.failed++;
+    });
+    return counts;
+  }
+
+  // total is 0 when the item list isn't known yet (counted by key prefix).
+  function countText({ succeeded, pending, failed }, total) {
+    const parts = [];
+    if (succeeded) parts.push(total ? `${succeeded}/${total}` : `${succeeded}`);
+    if (pending) parts.push(`${pending} ${pending === 1 ? 'läuft' : 'laufen'}`);
+    if (failed) parts.push(`${failed} Fehler`);
+    return parts.length ? `[${parts.join(' · ')}]` : '';
+  }
+
+  function countTitle({ succeeded, pending, failed }, total) {
+    const parts = [total ? `${succeeded} von ${total} Dateien heruntergeladen` : `${succeeded} Dateien heruntergeladen`];
+    if (pending) parts.push(`${pending} ${pending === 1 ? 'läuft' : 'laufen'} noch`);
+    if (failed) parts.push(`${failed} fehlgeschlagen`);
+    return parts.join(', ');
+  }
+
+  function isComplete(counts, total) {
+    return total > 0 && counts.succeeded === total;
+  }
+
+  function countBadge(counts, total) {
+    if (isComplete(counts, total)) return createPixelCheckmark(counts.confirmed === total);
+    const text = countText(counts, total);
+    return text ? createTextBadge(text, countTitle(counts, total)) : null;
+  }
+
+  function stateBadge(entry) {
+    if (isSucceeded(entry)) return createPixelCheckmark(entry.state === 'completed');
+    if (isPending(entry)) return createTextBadge('[...]', 'Wird heruntergeladen');
+    if (entry && entry.state === 'failed') return createTextBadge('[FEHLER]', 'Herunterladen fehlgeschlagen');
+    return null;
+  }
+
+  // List row header (book, podcast, magazine). Expects display:flex on the row;
+  // data-new prefixes the [NEU] marker.
+  function setRowLabel(row, badge) {
+    const title = document.createElement('span');
+    title.textContent = (row.dataset.new ? '[NEU] ' : '') + row.dataset.downloadTitle;
+    css(title, { flex: '1', minWidth: '0' });
+    row.replaceChildren(title);
+    if (badge) row.appendChild(badge);
+  }
+
+  function refreshRow(row, store) {
+    if (row.dataset.downloadInProgress) return;
+    const { downloadRow, downloadKey, downloadMergedKey, downloadKeys, downloadPrefix } = row.dataset;
+    // Magazine rows get their key once the current issue's date is known.
+    if (downloadRow === 'magazine') {
+      setRowLabel(row, downloadKey ? stateBadge(store[downloadKey]) : null);
+      return;
+    }
+    const merged = downloadMergedKey && store[downloadMergedKey];
+    if (isSucceeded(merged)) {
+      setRowLabel(row, createPixelCheckmark(merged.state === 'completed', 'Zusammengeführte M4B-Datei heruntergeladen'));
+      return;
+    }
+    const keys = downloadKeys
+      ? JSON.parse(downloadKeys)
+      : Object.keys(store).filter(key => key.startsWith(downloadPrefix));
+    setRowLabel(row, countBadge(countStates(store, keys), downloadKeys ? keys.length : 0));
+  }
+
+  // Single-file button (chapter, episode, merged .m4b).
+  function setExactDownloadLabel(element, store) {
+    if (element.dataset.downloadInProgress) return;
+    const label = element.dataset.downloadLabel;
+    const entry = store[element.dataset.downloadKey];
+    if (isSucceeded(entry)) {
+      element.replaceChildren(document.createTextNode(label), createPixelCheckmark(entry.state === 'completed'));
+      css(element, { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' });
+      return;
+    }
+    const prefix = isPending(entry) ? '[...] ' : entry && entry.state === 'failed' ? '[FEHLER] ' : '';
+    element.textContent = prefix + label;
+    css(element, { display: 'block' });
+  }
+
+  // "Download all" button.
+  function setSummaryDownloadLabel(element, store) {
+    if (element.dataset.downloadInProgress) return;
+    const keys = JSON.parse(element.dataset.downloadKeys);
+    const counts = countStates(store, keys);
+    if (isComplete(counts, keys.length)) {
+      element.replaceChildren(
+        document.createTextNode(element.dataset.downloadFullLabel),
+        createPixelCheckmark(counts.confirmed === keys.length, 'Heruntergeladen', COLORS.accentText),
+      );
+      return;
+    }
+    const text = countText(counts, keys.length);
+    element.textContent = text ? `${text} ${element.dataset.downloadBaseLabel}` : element.dataset.downloadBaseLabel;
+  }
+
+  function refreshDownloadIndicators() {
+    const store = readDownloadStore();
+    document.querySelectorAll('#ice-dl-panel [data-download-exact]').forEach(el => setExactDownloadLabel(el, store));
+    document.querySelectorAll('#ice-dl-panel [data-download-summary]').forEach(el => setSummaryDownloadLabel(el, store));
+    document.querySelectorAll('#ice-dl-panel [data-download-row]').forEach(row => refreshRow(row, store));
+  }
+
+  window.addEventListener(DOWNLOAD_STATE_EVENT, refreshDownloadIndicators);
+
   // ---------------------------------------------------------------------------
   // Panel
   // ---------------------------------------------------------------------------
 
   const TABS = {
-    audiobooks: { label: 'Hörbücher',    load: listBooks, render: renderBooks },
-    podcasts:   { label: 'Podcasts',     load: listPodcasts, render: renderPodcasts },
-    magazines:  { label: 'Zeitschriften', load: listMagazines, render: renderMagazines },
+    audiobooks: { label: 'Hörbücher',    load: listBooks, render: renderBooks, id: book => book.slug },
+    podcasts:   { label: 'Podcasts',     load: listPodcasts, render: renderPodcasts, id: podcast => podcast.slug },
+    magazines:  { label: 'Zeitschriften', load: listMagazines, render: renderMagazines, id: magazine => magazine.href },
   };
+
+  const SEEN_STORE_KEY = 'iceportal-dl.seen.v1';
+  const SEEN_BASELINE_KEY = 'iceportal-dl.seen-baseline.v1';
+
+  // A visit is a browser-tab session (sessionStorage), so reloads keep the
+  // markers. The baseline is the list from the previous visit; null on the first.
+  function newItemIds(section, ids) {
+    const baselines = JSON.parse(sessionStorage.getItem(SEEN_BASELINE_KEY) || '{}');
+    const seen = JSON.parse(GM_getValue(SEEN_STORE_KEY, '{}'));
+    if (!(section in baselines)) {
+      baselines[section] = seen[section] || null;
+      sessionStorage.setItem(SEEN_BASELINE_KEY, JSON.stringify(baselines));
+    }
+    seen[section] = ids;
+    GM_setValue(SEEN_STORE_KEY, JSON.stringify(seen));
+
+    if (!baselines[section]) return new Set();
+    const known = new Set(baselines[section]);
+    return new Set(ids.filter(id => !known.has(id)));
+  }
   let activeTab = 'audiobooks';
 
   function buildPanel() {
@@ -966,9 +1256,13 @@
     if (list) list.innerHTML = '';
     setStatus('Wird geladen…');
     try {
-      const items = await TABS[name].load();
+      const tab = TABS[name];
+      const items = await tab.load();
+      const fresh = newItemIds(name, items.map(tab.id));
+      items.forEach(item => { item.isNew = fresh.has(tab.id(item)); });
       const count = items.length;
-      setStatus(`${count} ${count !== 1 ? 'Einträge' : 'Eintrag'} verfügbar`, COLORS.accent);
+      const newLabel = fresh.size ? ` · ${fresh.size} neu` : '';
+      setStatus(`${count} ${count !== 1 ? 'Einträge' : 'Eintrag'} verfügbar${newLabel}`, COLORS.accent);
       TABS[name].render(items);
     } catch (e) {
       setStatus(`Laden fehlgeschlagen: ${e.message}`, COLORS.accent);
@@ -987,6 +1281,8 @@
   let selectedGenreFilter = '';
   let selectedPodcastTypeFilter = '';
   let selectedPodcastDurationFilter = '';
+  let selectedMagazineTopicFilter = '';
+  let selectedMagazineFormatFilter = '';
 
   function renderBooks(books) {
     const list = document.getElementById('ice-dl-list');
@@ -1048,6 +1344,7 @@
     const select = document.createElement('select');
     css(select, {
       flex:         '1',
+      minWidth:     '0',   // otherwise the longest option sets the width and the row overflows
       padding:      '4px 22px 4px 6px',   // room for our custom arrow on the right
       border:       `1px solid ${COLORS.accent}`,
       color:        COLORS.accentText,
@@ -1115,9 +1412,15 @@
       css(wrapper, { overflow: 'hidden' });
 
       const rowHeader = document.createElement('div');
-      rowHeader.textContent = bookDisplayTitle(book);
+      rowHeader.dataset.downloadRow = 'book';
+      rowHeader.dataset.downloadPrefix = audiobookChapterPrefix(book.slug);
+      rowHeader.dataset.downloadMergedKey = audiobookMergedKey(book.slug);
+      if (book.isNew) rowHeader.dataset.new = '1';
+      setBookRowData(rowHeader, book);
       rowHeader.dataset.slug = book.slug;
       css(rowHeader, {
+        display:      'flex',
+        alignItems:   'center',
         padding:      '8px 10px',
         cursor:       'pointer',
         background:   COLORS.headerBg,
@@ -1146,6 +1449,7 @@
       wrapper.appendChild(detail);
       list.appendChild(wrapper);
     });
+    refreshDownloadIndicators();
   }
 
   // Author isn't in the list endpoint; it's fetched per book in the background
@@ -1155,13 +1459,27 @@
     return details && details.author ? `${details.author} – ${book.title}` : book.title;
   }
 
+  function setBookRowData(row, book) {
+    row.dataset.downloadTitle = bookDisplayTitle(book);
+    const details = bookDetailsCache.get(book.slug);
+    if (details) row.dataset.downloadKeys = JSON.stringify(audiobookChapterKeys(book.slug, details.files));
+  }
+
+  function setPodcastRowData(row, podcast) {
+    const details = podcastDetailsCache.get(podcast.slug);
+    if (details) row.dataset.downloadKeys = JSON.stringify(podcastEpisodeKeys(podcast.slug, details.files));
+  }
+
   async function enrichBooksWithAuthor(books, itemsContainer) {
     const missing = books.filter(b => !bookDetailsCache.has(b.slug));
     await mapWithConcurrency(missing, RESOLVE_CONCURRENCY, async book => {
       try {
         await getBookDetails(book.slug);
         const row = itemsContainer.querySelector(`[data-slug="${CSS.escape(book.slug)}"]`);
-        if (row) row.textContent = bookDisplayTitle(book);
+        if (row) {
+          setBookRowData(row, book);
+          refreshRow(row, readDownloadStore());
+        }
       } catch (e) {
         console.error('[ICE DL] author fetch failed', book.slug, e);
       }
@@ -1206,17 +1524,25 @@
     dlAllBtn.onmouseleave = () => { dlAllBtn.style.background = COLORS.accent; };
     const sorted = [...details.files].sort((a, b) => a.serialNumber - b.serialNumber);
 
-    const tagCtx = { author, bookTitle, rawAuthor, rawBookTitle, total, coverPromise };
+    const tagCtx = { slug: book.slug, author, bookTitle, rawAuthor, rawBookTitle, total, coverPromise };
+    dlAllBtn.dataset.downloadSummary = '1';
+    dlAllBtn.dataset.downloadKeys = JSON.stringify(audiobookChapterKeys(book.slug, sorted));
+    dlAllBtn.dataset.downloadBaseLabel = `Alle ${total} Kapitel herunterladen`;
+    dlAllBtn.dataset.downloadFullLabel = `Alle ${total} Kapitel heruntergeladen`;
     dlAllBtn.onclick = () => downloadAllTracks(sorted, tagCtx, dlAllBtn);
     container.appendChild(dlAllBtn);
 
     if (total > 1) {
-      const mergeBtn = makeButton(`Als eine Datei zusammenführen (.m4b)`, {
+      const mergeLabel = 'Als eine Datei zusammenführen (.m4b)';
+      const mergeBtn = makeButton(mergeLabel, {
         display:      'block',
         width:        '100%',
         textAlign:    'left',
         marginBottom: '10px',
       });
+      mergeBtn.dataset.downloadExact = '1';
+      mergeBtn.dataset.downloadKey = audiobookMergedKey(book.slug);
+      mergeBtn.dataset.downloadLabel = mergeLabel;
       mergeBtn.title = `Lädt das ganze Buch als eine .m4b mit Kapitelmarken (puffert alle ${total} Kapitel im Speicher)`;
       mergeBtn.onclick = () => mergeBookDownload(sorted, tagCtx, mergeBtn);
       container.appendChild(mergeBtn);
@@ -1225,55 +1551,77 @@
     sorted.forEach(chapter => {
       const durationLabel = chapter.duration ? ` · ${formatDuration(chapter.duration)}` : '';
       const label = `${pad(chapter.serialNumber, total)}. ${cleanText(chapter.title)}${durationLabel}`;
+      const stateKey = audiobookChapterKey(book.slug, chapter.serialNumber);
 
       const btn = makeButton(label, { display: 'block', width: '100%', textAlign: 'left', marginBottom: '4px' });
+      btn.dataset.downloadExact = '1';
+      btn.dataset.downloadKey = stateKey;
+      btn.dataset.downloadLabel = label;
 
       btn.onclick = async () => {
         btn.textContent = `[...] ${label}`;
         btn.disabled = true;
+        btn.dataset.downloadInProgress = '1';
         try {
           const url = await resolveChapterURL(chapter.path);
           const filename = buildFilename(author, bookTitle, chapter.serialNumber, chapter.title, total, extFromUrl(url, 'm4a'));
           const tags = buildTags(rawAuthor, rawBookTitle, chapter, total, await coverPromise);
-          await downloadTaggedChapter(url, filename, tags);
-          btn.textContent = `[OK] ${label}`;
+          await downloadTaggedChapter(url, filename, tags, stateKey);
+          delete btn.dataset.downloadInProgress;
+          setExactDownloadLabel(btn, readDownloadStore());
         } catch (e) {
+          markDownloadState(stateKey, 'failed');
+          delete btn.dataset.downloadInProgress;
           btn.textContent = `[FEHLER] ${label}`;
           btn.title = e.message;
+        } finally {
           btn.disabled = false;
         }
       };
 
       container.appendChild(btn);
     });
+
+    container.appendChild(makeResetButton(audiobookPrefix(book.slug)));
+    setBookRowData(container.previousElementSibling, book);
+    refreshDownloadIndicators();
+  }
+
+  function makeResetButton(prefix) {
+    const btn = makeButton('Alle Download-Markierungen zurücksetzen', { marginTop: '8px', fontSize: '11px' });
+    btn.onclick = () => clearDownloadStatePrefix(prefix);
+    return btn;
   }
 
   // Browsers block bursts of auto-downloads, so space out the triggers.
   const DOWNLOAD_TRIGGER_DELAY_MS = 400;
 
   async function downloadAllTracks(sorted, tagCtx, triggerBtn) {
-    const { author, bookTitle, rawAuthor, rawBookTitle, total, coverPromise } = tagCtx;
+    const { slug, author, bookTitle, rawAuthor, rawBookTitle, total, coverPromise } = tagCtx;
     triggerBtn.disabled = true;
+    triggerBtn.dataset.downloadInProgress = '1';
     try {
       triggerBtn.textContent = `[...] Löse ${total} Kapitel auf…`;
       const resolved = await resolveAll(sorted);
       const cover = await coverPromise;
 
-      let failed = 0;
       for (let i = 0; i < resolved.length; i++) {
         const { chapter, url } = resolved[i];
         triggerBtn.textContent = `[...] Lade ${i + 1}/${total}…`;
-        if (!url) { failed++; continue; }
+        const stateKey = audiobookChapterKey(slug, chapter.serialNumber);
+        if (!url) {
+          markDownloadState(stateKey, 'failed');
+          continue;
+        }
         const filename = buildFilename(author, bookTitle, chapter.serialNumber, chapter.title, total, extFromUrl(url, 'm4a'));
         const tags = buildTags(rawAuthor, rawBookTitle, chapter, total, cover);
-        await downloadTaggedChapter(url, filename, tags);
+        await downloadTaggedChapter(url, filename, tags, stateKey);
         await delay(DOWNLOAD_TRIGGER_DELAY_MS);
       }
-      triggerBtn.textContent = failed
-        ? `[WARNUNG] ${total - failed}/${total} gestartet (${failed} fehlgeschlagen)`
-        : `[OK] Alle ${total} gestartet`;
     } finally {
+      delete triggerBtn.dataset.downloadInProgress;
       triggerBtn.disabled = false;
+      setSummaryDownloadLabel(triggerBtn, readDownloadStore());
     }
   }
 
@@ -1286,21 +1634,71 @@
     if (!list) return;
     list.innerHTML = '';
 
-    if (magazines.length === 0) {
-      list.textContent = 'Zurzeit keine kostenlosen Zeitschriften verfügbar.';
+    const filterBar = buildMagazineFilterBar(magazines);
+    if (filterBar) list.appendChild(filterBar);
+
+    const itemsContainer = document.createElement('div');
+    itemsContainer.id = 'ice-dl-magazine-items';
+    list.appendChild(itemsContainer);
+
+    renderMagazineItems(magazines, itemsContainer);
+    enrichMagazinesWithDate(magazines, itemsContainer);
+  }
+
+  function buildMagazineFilterBar(magazines) {
+    if (magazineFilterDefs.length === 0) return null;
+
+    const topicDefs = magazineFilterDefs.filter(f => !MAGAZINE_FORMAT_LABELS[f.id]);
+    const formatDefs = magazineFilterDefs
+      .filter(f => MAGAZINE_FORMAT_LABELS[f.id])
+      .map(f => ({ ...f, text: MAGAZINE_FORMAT_LABELS[f.id] }));
+
+    const row = document.createElement('div');
+    css(row, { display: 'flex', gap: '6px', marginBottom: '10px' });
+
+    const rerender = () => renderMagazineItems(magazines, document.getElementById('ice-dl-magazine-items'));
+
+    row.appendChild(buildFilterSelect('Alle Kategorien', topicDefs, selectedMagazineTopicFilter, value => {
+      selectedMagazineTopicFilter = value;
+      rerender();
+    }));
+    row.appendChild(buildFilterSelect('Alle Formate', formatDefs, selectedMagazineFormatFilter, value => {
+      selectedMagazineFormatFilter = value;
+      rerender();
+    }));
+    return row;
+  }
+
+  function renderMagazineItems(magazines, list) {
+    if (!list) return;
+    list.innerHTML = '';
+
+    const filtered = magazines.filter(m =>
+      (!selectedMagazineTopicFilter || m.filterIds.includes(selectedMagazineTopicFilter)) &&
+      (!selectedMagazineFormatFilter || m.filterIds.includes(selectedMagazineFormatFilter))
+    );
+
+    if (filtered.length === 0) {
+      list.textContent = magazines.length === 0
+        ? 'Zurzeit keine kostenlosen Zeitschriften verfügbar.'
+        : 'Keine Zeitschriften entsprechen den gewählten Filtern.';
       return;
     }
 
-    magazines.forEach((magazine, i) => {
+    filtered.forEach((magazine, i) => {
       if (i > 0) list.appendChild(dotLine({ margin: '4px 0' }));
 
       const wrapper = document.createElement('div');
       css(wrapper, { overflow: 'hidden' });
 
       const rowHeader = document.createElement('div');
-      rowHeader.textContent = magazine.title;
+      rowHeader.dataset.downloadRow = 'magazine';
       rowHeader.dataset.href = magazine.href;
+      if (magazine.isNew) rowHeader.dataset.new = '1';
+      setMagazineRowData(rowHeader, magazine);
       css(rowHeader, {
+        display:      'flex',
+        alignItems:   'center',
         padding:      '8px 10px',
         cursor:       'pointer',
         background:   COLORS.headerBg,
@@ -1311,21 +1709,55 @@
       rowHeader.onclick = async () => {
         rowHeader.textContent = `[...] ${magazine.title}`;
         rowHeader.style.pointerEvents = 'none';
+        rowHeader.dataset.downloadInProgress = '1';
         try {
           const details = await getMagazineDetails(magazine.href);
+          setMagazineRowData(rowHeader, magazine);
           const url = resolveMagazineURL(details);
           const filename = buildMagazineFilename(magazine.title, details.date, details.fileFormat || extFromUrl(url, 'pdf'));
-          triggerDownload(url, filename);
-          rowHeader.textContent = `[OK] ${magazine.title}`;
+          triggerDownload(url, filename, rowHeader.dataset.downloadKey);
+          delete rowHeader.dataset.downloadInProgress;
+          refreshRow(rowHeader, readDownloadStore());
         } catch (e) {
+          if (rowHeader.dataset.downloadKey) markDownloadState(rowHeader.dataset.downloadKey, 'failed');
+          delete rowHeader.dataset.downloadInProgress;
           rowHeader.textContent = `[FEHLER] ${magazine.title}`;
           rowHeader.title = e.message;
+        } finally {
           rowHeader.style.pointerEvents = '';
         }
       };
 
       wrapper.appendChild(rowHeader);
       list.appendChild(wrapper);
+    });
+    refreshDownloadIndicators();
+  }
+
+  // details.date is ISO "YYYY-MM-DD".
+  const formatIssueDate = iso => iso.split('-').reverse().join('.');
+
+  function setMagazineRowData(row, magazine) {
+    const date = magazineIssueDates.get(magazine.href);
+    row.dataset.downloadTitle = date ? `${magazine.title} · ${formatIssueDate(date)}` : magazine.title;
+    if (date) row.dataset.downloadKey = magazineKey(magazine.href, date);
+  }
+
+  // The issue date is only in the per-title details; fetched in the background
+  // and the row updated in place once known.
+  async function enrichMagazinesWithDate(magazines, itemsContainer) {
+    const missing = magazines.filter(m => !magazineIssueDates.has(m.href));
+    await mapWithConcurrency(missing, RESOLVE_CONCURRENCY, async magazine => {
+      try {
+        await getMagazineDetails(magazine.href);
+        const row = itemsContainer.querySelector(`[data-href="${CSS.escape(magazine.href)}"]`);
+        if (row) {
+          setMagazineRowData(row, magazine);
+          refreshRow(row, readDownloadStore());
+        }
+      } catch (e) {
+        console.error('[ICE DL] issue date fetch failed', magazine.href, e);
+      }
     });
   }
 
@@ -1400,9 +1832,15 @@
       css(wrapper, { overflow: 'hidden' });
 
       const rowHeader = document.createElement('div');
-      rowHeader.textContent = podcast.title;
+      rowHeader.dataset.downloadRow = 'podcast';
+      rowHeader.dataset.downloadTitle = podcast.title;
+      rowHeader.dataset.downloadPrefix = podcastEpisodePrefix(podcast.slug);
+      if (podcast.isNew) rowHeader.dataset.new = '1';
+      setPodcastRowData(rowHeader, podcast);
       rowHeader.dataset.slug = podcast.slug;
       css(rowHeader, {
+        display:      'flex',
+        alignItems:   'center',
         padding:      '8px 10px',
         cursor:       'pointer',
         background:   COLORS.headerBg,
@@ -1431,6 +1869,7 @@
       wrapper.appendChild(detail);
       list.appendChild(wrapper);
     });
+    refreshDownloadIndicators();
   }
 
   async function renderPodcastDetail(podcast, container) {
@@ -1458,58 +1897,77 @@
     dlAllBtn.onmouseenter = () => { dlAllBtn.style.background = COLORS.accentHover; };
     dlAllBtn.onmouseleave = () => { dlAllBtn.style.background = COLORS.accent; };
     const sorted = [...details.files].sort((a, b) => b.serialNumber - a.serialNumber);
-
-    dlAllBtn.onclick = () => downloadAllEpisodes(sorted, { podcastTitle: podcast.title }, dlAllBtn);
+    dlAllBtn.dataset.downloadSummary = '1';
+    dlAllBtn.dataset.downloadKeys = JSON.stringify(podcastEpisodeKeys(podcast.slug, sorted));
+    dlAllBtn.dataset.downloadBaseLabel = `Alle ${total} Folgen herunterladen`;
+    dlAllBtn.dataset.downloadFullLabel = `Alle ${total} Folgen heruntergeladen`;
+    dlAllBtn.onclick = () => downloadAllEpisodes(sorted, { slug: podcast.slug, podcastTitle: podcast.title }, dlAllBtn);
     container.appendChild(dlAllBtn);
 
     sorted.forEach(episode => {
       const durationLabel = episode.duration ? ` · ${formatDuration(episode.duration)}` : '';
       const label = `${pad(episode.serialNumber, 9999)}. ${cleanText(episode.title)}${durationLabel} · ${episode.releaseDate}`;
+      const stateKey = podcastEpisodeKey(podcast.slug, episode.serialNumber);
 
       const btn = makeButton(label, { display: 'block', width: '100%', textAlign: 'left', marginBottom: '4px' });
+      btn.dataset.downloadExact = '1';
+      btn.dataset.downloadKey = stateKey;
+      btn.dataset.downloadLabel = label;
 
       btn.onclick = async () => {
         btn.textContent = `[...] ${label}`;
         btn.disabled = true;
+        btn.dataset.downloadInProgress = '1';
         try {
           const url = await resolveChapterURL(episode.path);
           const filename = buildPodcastFilename(podcast.title, episode.serialNumber, episode.title, extFromUrl(url, 'mp3'));
-          triggerDownload(url, filename);
-          btn.textContent = `[OK] ${label}`;
+          triggerDownload(url, filename, stateKey);
+          delete btn.dataset.downloadInProgress;
+          setExactDownloadLabel(btn, readDownloadStore());
         } catch (e) {
+          markDownloadState(stateKey, 'failed');
+          delete btn.dataset.downloadInProgress;
           btn.textContent = `[FEHLER] ${label}`;
           btn.title = e.message;
+        } finally {
           btn.disabled = false;
         }
       };
 
       container.appendChild(btn);
     });
+
+    container.appendChild(makeResetButton(podcastPrefix(podcast.slug)));
+    setPodcastRowData(container.previousElementSibling, podcast);
+    refreshDownloadIndicators();
   }
 
   async function downloadAllEpisodes(sorted, ctx, triggerBtn) {
-    const { podcastTitle } = ctx;
+    const { slug, podcastTitle } = ctx;
     const total = sorted.length;
     triggerBtn.disabled = true;
+    triggerBtn.dataset.downloadInProgress = '1';
     try {
       triggerBtn.textContent = `[...] Löse ${total} Folgen auf…`;
       const resolved = await resolveAll(sorted);
 
-      let failed = 0;
       for (let i = 0; i < resolved.length; i++) {
         const { chapter, url } = resolved[i];
         triggerBtn.textContent = `[...] Lade ${i + 1}/${total}…`;
-        if (!url) { failed++; continue; }
+        const stateKey = podcastEpisodeKey(slug, chapter.serialNumber);
+        if (!url) {
+          markDownloadState(stateKey, 'failed');
+          continue;
+        }
         const ext = extFromUrl(url, 'mp3');
         const filename = buildPodcastFilename(podcastTitle, chapter.serialNumber, chapter.title, ext);
-        triggerDownload(url, filename);
+        triggerDownload(url, filename, stateKey);
         await delay(DOWNLOAD_TRIGGER_DELAY_MS);
       }
-      triggerBtn.textContent = failed
-        ? `[WARNUNG] ${total - failed}/${total} gestartet (${failed} fehlgeschlagen)`
-        : `[OK] Alle ${total} gestartet`;
     } finally {
+      delete triggerBtn.dataset.downloadInProgress;
       triggerBtn.disabled = false;
+      setSummaryDownloadLabel(triggerBtn, readDownloadStore());
     }
   }
 

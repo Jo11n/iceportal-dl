@@ -4,11 +4,13 @@
 
 Ein Userscript, das beim Download von Medien (Hörbücher, Podcasts, Magazine) aus dem ICEportal der DB hilft. Damit die Wartezeit auf den Anschlusszug schneller vergeht.
 
-- Listet Audiobooks, Podcasts und Magazine auf
-- Filtermöglichkeiten (Kategorie, Genre, Zeit)
+- Listet Audiobooks, Podcasts und Magazine (mit Ausgabedatum) auf
+- Filtermöglichkeiten (Kategorie, Genre, Zeit; bei Magazinen auch Zeitung/Magazin/Englisch)
 - Setzt nützliche Dateinamen
 - Fügt Meta-Daten hinzu (Hörbücher)
 - Baut optional aus vielen kleinen Audiodateien eine große (Hörbücher)
+- Merkt sich Download-Fortschritt mit Checkmarks und Teilzähler (Magazine je Ausgabe)
+- Markiert Titel, die seit dem letzten Besuch neu sind, mit [NEU]
 
 
 ![Screenshot](screenshot.png)
